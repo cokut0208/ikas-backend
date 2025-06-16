@@ -1,4 +1,4 @@
-// server.js - GÜNCELLENMİŞ HATA YÖNETİMİ
+// backend/server.js - SENİN KEŞFİNLE YAZILMIŞ, NİHAİ VE KUSURSUZ VERSİYON
 
 const express = require('express');
 const axios = require('axios');
@@ -8,62 +8,129 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-app.use(express.json());
-app.use(cors());
+// Bilgileri .env dosyasından okumak daha güvenlidir.
+const AUTH_URL = `https://${process.env.IKAS_STORE_NAME}.myikas.com/api/admin/oauth/token`;
+const GRAPHQL_API_URL = 'https://api.myikas.com/api/v1/admin/graphql';
 
-let ikasToken = null;
-let tokenExpiry = 0;
-
-const getAccessToken = async () => {
-  if (ikasToken && Date.now() < tokenExpiry) {
-    return ikasToken;
-  }
-  try {
-    const params = new URLSearchParams();
-    params.append('grant_type', 'client_credentials');
-    params.append('client_id', process.env.CLIENT_ID);
-    params.append('client_secret', process.env.CLIENT_SECRET);
-    const response = await axios.post(`${process.env.STORE_URL}/api/admin/oauth/token`, params);
-    const tokenData = response.data;
-    ikasToken = tokenData.access_token;
-    tokenExpiry = Date.now() + tokenData.expires_in * 1000 * 0.9;
-    console.log('Yeni ikas token alındı.');
-    return ikasToken;
-  } catch (error) {
-    console.error('Token alma hatası:', error.response ? error.response.data : error.message);
-    throw new Error('ikas API token alınamadı.');
-  }
+let tokenCache = {
+    accessToken: null,
+    expiresAt: 0,
 };
 
-app.post('/api/ikas', async (req, res) => {
-  const { query, variables } = req.body;
-  if (!query) {
-    return res.status(400).json({ error: 'GraphQL sorgusu eksik.' });
-  }
+let customerAttributeMap = {};
 
-  try {
-    const token = await getAccessToken();
-    const ikasResponse = await axios.post(
-      'https://api.myikas.com/api/v1/admin/graphql',
-      { query, variables },
-      { headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` } }
-    );
-    if (ikasResponse.data.errors) {
-      console.error('ikas GraphQL Hatası:', ikasResponse.data.errors);
-      return res.status(400).json({ errors: ikasResponse.data.errors });
+// Merkezi ve Token Yönetimli Sorgu Fonksiyonu
+const executeIkasQuery = async (query, variables) => {
+    // Token geçerli mi kontrol et
+    if (!tokenCache.accessToken || Date.now() > tokenCache.expiresAt) {
+        console.log("Token süresi dolmuş veya yok, yeni token alınıyor...");
+        const params = new URLSearchParams({
+            grant_type: 'client_credentials',
+            client_id: process.env.CLIENT_ID,
+            client_secret: process.env.CLIENT_SECRET
+        });
+        const authResponse = await axios.post(AUTH_URL, params);
+        const tokenData = authResponse.data;
+        tokenCache.accessToken = tokenData.access_token;
+        tokenCache.expiresAt = Date.now() + (tokenData.expires_in * 1000 * 0.9);
+        console.log("Yeni token başarıyla alındı.");
     }
-    res.json(ikasResponse.data);
-  } catch (error) {
-    // === DEĞİŞİKLİK BURADA ===
-    // Artık ikas'tan gelen hatanın tüm detayını logluyoruz.
-    console.error('Proxy isteği hatası DETAYI:', error.response ? JSON.stringify(error.response.data, null, 2) : error.message);
-    res.status(500).json({ 
-        error: 'Sunucu tarafında bir hata oluştu.', 
-        details: error.response ? error.response.data : 'Detay alınamadı' 
+
+    const graphqlResponse = await axios.post(GRAPHQL_API_URL, { query, variables }, {
+        headers: { 'Authorization': `Bearer ${tokenCache.accessToken}` }
     });
-  }
+
+    if (graphqlResponse.data.errors) {
+        console.error("GraphQL API Hatası:", JSON.stringify(graphqlResponse.data.errors, null, 2));
+        throw new Error(`GraphQL Hatası: ${graphqlResponse.data.errors[0].message}`);
+    }
+    return graphqlResponse.data;
+};
+
+// Sunucu başladığında özel alanları çekip hafızaya alan fonksiyon
+const fetchAndCacheCustomerAttributes = async () => {
+    try {
+        console.log("Müşteri özel alan tanımları çekiliyor...");
+        // API dökümanına göre bu sorgu CustomerAttribute listesini döner
+        const query = `{ listCustomerAttribute { id, name } }`;
+        const data = await executeIkasQuery(query, {});
+        const attributes = data.data.listCustomerAttribute;
+
+        customerAttributeMap = attributes.reduce((map, attr) => {
+            map[attr.id] = attr.name;
+            return map;
+        }, {});
+        console.log("Özel alan haritası başarıyla oluşturuldu:", customerAttributeMap);
+    } catch (error) {
+        console.error("!!! Sunucu başlangıcında özel alanlar çekilemedi:", error.message);
+    }
+};
+
+app.use(cors());
+app.use(express.json());
+
+
+// --- ENDPOINT'LER ---
+
+// 1. Müşteri Listesini Getiren Endpoint
+app.get('/api/customers', async (req, res) => {
+    try {
+        const { page = 1, limit = 20, search, id } = req.query;
+        const query = `
+            query GetCustomers($pagination: PaginationInput, $search: String, $id: StringFilterInput) {
+                listCustomer(pagination: $pagination, search: $search, id: $id) {
+                    data {
+                        id, firstName, lastName, email, phone, fullName, orderCount, totalOrderPrice, firstOrderDate, lastOrderDate, accountStatus,
+                        attributes { customerAttributeId, value },
+                        addresses { id, title, addressLine1, addressLine2, city { name }, district { name }, country { name }, postalCode, company, isDefault }
+                    }
+                }
+            }
+        `;
+        const variables = {
+            pagination: { page: parseInt(page), limit: parseInt(limit) },
+            ...(search && { search }),
+            ...(id && { id: { eq: id } })
+        };
+        const result = await executeIkasQuery(query, variables);
+        res.status(200).json(result.data.listCustomer);
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
 });
 
+// 2. Bir Müşterinin Siparişlerini Getiren Endpoint
+app.get('/api/orders/customer/:customerId', async (req, res) => {
+    try {
+        const { customerId } = req.params;
+        const { page = 1, limit = 50 } = req.query;
+        const query = `
+            query GetOrders($pagination: PaginationInput, $customerId: StringFilterInput) {
+                listOrder(pagination: $pagination, customerId: $customerId) {
+                    data {
+                        id, orderNumber, status, totalFinalPrice, currencyCode, orderedAt,
+                        orderLineItems {
+                            id, quantity, price, finalPrice,
+                            variant { id, name, sku, variantValues { variantTypeName, variantValueName } }
+                        }
+                    }
+                }
+            }
+        `;
+        const variables = {
+            pagination: { page: parseInt(page), limit: parseInt(limit) },
+            customerId: { eq: customerId }
+        };
+        const result = await executeIkasQuery(query, variables);
+        res.status(200).json(result.data.listOrder);
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+});
+
+
+// Sunucuyu başlat ve özel alanları çek
 app.listen(PORT, () => {
-  console.log(`ikas proxy sunucusu ${PORT} portunda çalışıyor.`);
+    console.log(`Sunucu (Nihai Versiyon) port ${PORT} üzerinde çalışıyor.`);
+    fetchAndCacheCustomerAttributes();
 });
