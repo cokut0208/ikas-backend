@@ -1,14 +1,14 @@
-// backend/server.js - SENİN KEŞFİNLE YAZILMIŞ, NİHAİ VE KUSURSUZ VERSİYON
+// backend/server.js - PDF İÇİN GÜNCELLENMİŞ NİHAİ VERSİYON
 
 const express = require('express');
 const axios = require('axios');
-const cors = require('cors');
+const cors =require('cors');
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Bilgileri .env dosyasından okumak daha güvenlidir.
+// .env dosyasından okunan bilgiler
 const AUTH_URL = `https://${process.env.IKAS_STORE_NAME}.myikas.com/api/admin/oauth/token`;
 const GRAPHQL_API_URL = 'https://api.myikas.com/api/v1/admin/graphql';
 
@@ -21,7 +21,6 @@ let customerAttributeMap = {};
 
 // Merkezi ve Token Yönetimli Sorgu Fonksiyonu
 const executeIkasQuery = async (query, variables) => {
-    // Token geçerli mi kontrol et
     if (!tokenCache.accessToken || Date.now() > tokenCache.expiresAt) {
         console.log("Token süresi dolmuş veya yok, yeni token alınıyor...");
         const params = new URLSearchParams({
@@ -51,7 +50,6 @@ const executeIkasQuery = async (query, variables) => {
 const fetchAndCacheCustomerAttributes = async () => {
     try {
         console.log("Müşteri özel alan tanımları çekiliyor...");
-        // API dökümanına göre bu sorgu CustomerAttribute listesini döner
         const query = `{ listCustomerAttribute { id, name } }`;
         const data = await executeIkasQuery(query, {});
         const attributes = data.data.listCustomerAttribute;
@@ -69,10 +67,9 @@ const fetchAndCacheCustomerAttributes = async () => {
 app.use(cors());
 app.use(express.json());
 
-
 // --- ENDPOINT'LER ---
 
-// 1. Müşteri Listesini Getiren Endpoint
+// 1. Müşteri Listesini veya Tek Müşteriyi Getiren Endpoint
 app.get('/api/customers', async (req, res) => {
     try {
         const { page = 1, limit = 20, search, id } = req.query;
@@ -80,9 +77,8 @@ app.get('/api/customers', async (req, res) => {
             query GetCustomers($pagination: PaginationInput, $search: String, $id: StringFilterInput) {
                 listCustomer(pagination: $pagination, search: $search, id: $id) {
                     data {
-                        id, firstName, lastName, email, phone, fullName, orderCount, totalOrderPrice, firstOrderDate, lastOrderDate, accountStatus,
-                        attributes { customerAttributeId, value },
-                        addresses { id, title, addressLine1, addressLine2, city { name }, district { name }, country { name }, postalCode, company, isDefault }
+                        id, firstName, lastName, email, phone, fullName, orderCount, totalOrderPrice,
+                        attributes { customerAttributeId, value }
                     }
                 }
             }
@@ -99,7 +95,7 @@ app.get('/api/customers', async (req, res) => {
     }
 });
 
-// 2. Bir Müşterinin Siparişlerini Getiren Endpoint
+// 2. Bir Müşterinin Siparişlerini Getiren Endpoint (PDF için güncellendi)
 app.get('/api/orders/customer/:customerId', async (req, res) => {
     try {
         const { customerId } = req.params;
@@ -109,6 +105,15 @@ app.get('/api/orders/customer/:customerId', async (req, res) => {
                 listOrder(pagination: $pagination, customerId: $customerId) {
                     data {
                         id, orderNumber, status, totalFinalPrice, currencyCode, orderedAt,
+                        
+                        # === PDF İÇİN EKLENEN ALANLAR ===
+                        shippingAddress {
+                            firstName, lastName, addressLine1, city { name }, district { name }, phone
+                        },
+                        paymentMethods {
+                            type, price, paymentGatewayName
+                        },
+                        
                         orderLineItems {
                             id, quantity, price, finalPrice,
                             variant { id, name, sku, variantValues { variantTypeName, variantValueName } }
