@@ -1,4 +1,4 @@
-// backend/server.js - PDF için tüm verileri çeken NİHAİ VERSİYON
+// backend/server.js - GÜNCELLENMİŞ VERSİYON
 
 const express = require('express');
 const axios = require('axios');
@@ -83,6 +83,7 @@ app.get('/api/orders/customer/:customerId', async (req, res) => {
     try {
         const { customerId } = req.params;
         const { page = 1, limit = 50 } = req.query;
+        // ✅ GÜNCELLENMİŞ SORGULAMA: Daha fazla finansal detay eklendi.
         const query = `
             query GetOrders($pagination: PaginationInput, $customerId: StringFilterInput) {
                 listOrder(pagination: $pagination, customerId: $customerId) {
@@ -92,6 +93,7 @@ app.get('/api/orders/customer/:customerId', async (req, res) => {
                         paymentMethods { type, price, paymentGatewayName },
                         shippingLines { title, price },
                         taxLines { price, rate },
+                        orderAdjustments { name, amount, type },
                         orderLineItems {
                             id, quantity, price, finalPrice,
                             variant { id, name, sku, variantValues { variantTypeName, variantValueName } }
